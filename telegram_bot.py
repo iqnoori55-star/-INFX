@@ -30,11 +30,13 @@ POLL_SECONDS = 2.0
 EVENT_POLL_SECONDS = 3.0
 SUBSCRIBERS_FILE = Path("telegram_subscribers.json")
 SEEN_FILE = Path("telegram_seen_events.json")
+EVENT_STATE_FILE = Path("telegram_event_state.json")
 
 _subscribers_lock = threading.RLock()
 _subscribers = set()
 _seen_lock = threading.RLock()
 _seen = set()
+_event_state = {}
 
 
 def _load_json_set(path):
@@ -54,11 +56,16 @@ def _save_json_set(path, values):
 
 
 def load_state():
-    global _subscribers, _seen
+    global _subscribers, _seen, _event_state
     with _subscribers_lock:
         _subscribers = _load_json_set(SUBSCRIBERS_FILE)
     with _seen_lock:
         _seen = _load_json_set(SEEN_FILE)
+    try:
+        data = json.loads(EVENT_STATE_FILE.read_text(encoding="utf-8"))
+        _event_state = data if isinstance(data, dict) else {}
+    except Exception:
+        _event_state = {}
 
 
 def api(method, payload=None):
@@ -209,6 +216,7 @@ def event_key(row):
 
 
 def notify_new_events():
+    global _event_state
     try:
         cfg = app.get_current_config()
         rows = app.get_event_memory(cfg["symbol"], cfg["timeframe"], limit=100)
@@ -218,16 +226,43 @@ def notify_new_events():
     signals = [r for r in rows if r.get("event_type") == "signal"]
     for row in reversed(signals):
         key = event_key(row)
+        if not key:
+            continue
+        status = str(row.get("status") or "NEW").upper()
+
         with _seen_lock:
-            if key in _seen:
-                continue
-            _seen.add(key)
-            _save_json_set(SEEN_FILE, _seen)
+            previous = _event_state.get(key)
+            if previous is None:
+                # Backward compatibility: events already present in the old
+                # seen set must not be sent again as NEW after deployment.
+                if key in _seen:
+                    _event_state[key] = status
+                    continue
+                _event_state[key] = status
+                _seen.add(key)
+                _save_json_set(SEEN_FILE, _seen)
+                EVENT_STATE_FILE.write_text(
+                    json.dumps(_event_state, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+                should_send = True
+            elif previous != status:
+                _event_state[key] = status
+                EVENT_STATE_FILE.write_text(
+                    json.dumps(_event_state, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+                should_send = True
+            else:
+                should_send = False
+
+        if not should_send:
+            continue
 
         payload = row.get("payload")
         if not isinstance(payload, dict):
             continue
-        message = format_signal(payload, row.get("status"))
+        message = format_signal(payload, status)
 
         with _subscribers_lock:
             subscribers = list(_subscribers)
@@ -235,8 +270,6 @@ def notify_new_events():
             try:
                 send_message(chat_id, message)
             except Exception as exc:
-                # Telegram reports blocked/deleted chats. Remove only when
-                # Telegram explicitly rejects the chat; keep transient errors.
                 if "bot was blocked" in str(exc).lower() or "chat not found" in str(exc).lower():
                     remove_subscriber(chat_id)
 
