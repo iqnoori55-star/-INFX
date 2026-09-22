@@ -161,7 +161,7 @@ def handle_update(update):
             lines = ["<b>Recent INFX Signals</b>"]
             for row in signals:
                 p = row.get("payload") if isinstance(row.get("payload"), dict) else {}
-                lines.append(format_signal(p, row.get("status"), row.get("event_time")))
+                lines.append(format_signal(p, row.get("status")))
             send_message(chat_id, "\n\n".join(lines))
         except Exception as exc:
             send_message(chat_id, f"INFX is temporarily unavailable.\n<code>{escape(str(exc))}</code>")
@@ -230,10 +230,8 @@ def _parse_signal_time(value):
     if parsed is None:
         return None
 
-    # app.py creates TradingView candle datetimes from Unix timestamps.
-    # On Render these naive datetimes are UTC wall-clock values because the
-    # server runs in UTC. Match the dashboard by interpreting the raw value
-    # as UTC first, then converting it to Asia/Kabul for display.
+    # Match INFX: TradingView/Render naive candle timestamps are UTC.
+    # INFX then displays that same instant in Asia/Kabul.
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
 
@@ -289,7 +287,10 @@ def format_signal(payload, status=None, event_time=None):
     symbol = escape(payload.get("symbol") or app.CURRENT_SYMBOL)
     timeframe = escape(payload.get("timeframe") or app.CURRENT_TIMEFRAME_NAME)
     status_text = escape(status or payload.get("status") or "NEW")
-    # Use Event Memory event_time first. It is the same timestamp used by INFX for the setup.\n    signal_time = event_time or payload.get("signal_time") or payload.get("time")\n
+    # Use the immutable signal_time from the INFX signal payload.
+    # This is the same timestamp used by the INFX Signal Card.
+    signal_time = payload.get("signal_time") or payload.get("time")
+
     return (
         f"{icon} <b>INFX {direction or 'SIGNAL'}</b>\n"
         f"<b>{symbol} • {timeframe}</b>\n\n"
@@ -356,7 +357,7 @@ def notify_new_events():
         payload = row.get("payload")
         if not isinstance(payload, dict):
             continue
-        message = format_signal(payload, status, row.get("event_time"))
+        message = format_signal(payload, status)
 
         with _subscribers_lock:
             subscribers = list(_subscribers)
