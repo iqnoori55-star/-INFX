@@ -185,14 +185,37 @@ _KABUL_TZ = ZoneInfo("Asia/Kabul")
 
 
 def _parse_signal_time(value):
-    """Parse INFX signal timestamps consistently with the dashboard."""
+    """Parse Event Memory signal/event_time into an absolute UTC instant."""
     if value is None or value == "":
         return None
+
+    # Numeric Unix timestamps: support seconds and milliseconds.
+    if isinstance(value, (int, float)):
+        number = float(value)
+        if number > 10_000_000_000:
+            number /= 1000.0
+        try:
+            return datetime.fromtimestamp(number, tz=timezone.utc)
+        except Exception:
+            return None
+
     text = str(value).strip()
     if not text:
         return None
+
+    # Numeric strings can also be Unix timestamps.
+    try:
+        number = float(text)
+        if number > 10_000_000_000:
+            number /= 1000.0
+        if number > 1_000_000_000:
+            return datetime.fromtimestamp(number, tz=timezone.utc)
+    except Exception:
+        pass
+
     if text.endswith("Z"):
         text = text[:-1] + "+00:00"
+
     try:
         parsed = datetime.fromisoformat(text)
     except Exception:
@@ -203,11 +226,15 @@ def _parse_signal_time(value):
                 break
             except Exception:
                 pass
+
     if parsed is None:
         return None
-    # Naive TradingView/INFX timestamps are Kabul-local, not UTC.
+
+    # Event Memory stores the TradingView candle time without an offset.
+    # Match the dashboard's Asia/Kabul display convention.
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=_KABUL_TZ)
+
     return parsed.astimezone(timezone.utc)
 
 
@@ -222,7 +249,12 @@ def _signal_age_text(value):
     parsed = _parse_signal_time(value)
     if parsed is None:
         return "--"
-    seconds = max(0, int((datetime.now(timezone.utc) - parsed).total_seconds()))
+
+    seconds = max(
+        0,
+        int((datetime.now(timezone.utc) - parsed).total_seconds()),
+    )
+
     if seconds < 60:
         return f"{seconds}s"
     minutes = seconds // 60
@@ -236,7 +268,8 @@ def _signal_age_text(value):
 
 
 
-def format_signal(payload, status=None):
+
+def format_signal(payload, status=None, event_time=None):
     risk = payload.get("risk") if isinstance(payload.get("risk"), dict) else {}
     direction = str(payload.get("signal") or payload.get("direction") or "").upper()
     if direction in ("BULLISH", "LONG"):
@@ -254,8 +287,7 @@ def format_signal(payload, status=None):
     symbol = escape(payload.get("symbol") or app.CURRENT_SYMBOL)
     timeframe = escape(payload.get("timeframe") or app.CURRENT_TIMEFRAME_NAME)
     status_text = escape(status or payload.get("status") or "NEW")
-    signal_time = payload.get("signal_time") or payload.get("time") or payload.get("created_at")
-
+    # Use Event Memory event_time first. It is the same timestamp used by INFX for the setup.\n    signal_time = event_time or payload.get("signal_time") or payload.get("time")\n
     return (
         f"{icon} <b>INFX {direction or 'SIGNAL'}</b>\n"
         f"<b>{symbol} • {timeframe}</b>\n\n"
@@ -322,7 +354,7 @@ def notify_new_events():
         payload = row.get("payload")
         if not isinstance(payload, dict):
             continue
-        message = format_signal(payload, status)
+        message = format_signal(payload, status, row.get("event_time"))
 
         with _subscribers_lock:
             subscribers = list(_subscribers)
