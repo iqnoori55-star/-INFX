@@ -161,7 +161,7 @@ def handle_update(update):
             lines = ["<b>Recent INFX Signals</b>"]
             for row in signals:
                 p = row.get("payload") if isinstance(row.get("payload"), dict) else {}
-                lines.append(format_signal(p, row.get("status")))
+                lines.append(format_signal(p, row.get("status"), row.get("event_time")))
             send_message(chat_id, "\n\n".join(lines))
         except Exception as exc:
             send_message(chat_id, f"INFX is temporarily unavailable.\n<code>{escape(str(exc))}</code>")
@@ -230,10 +230,12 @@ def _parse_signal_time(value):
     if parsed is None:
         return None
 
-    # Event Memory stores the TradingView candle time without an offset.
-    # Match the dashboard's Asia/Kabul display convention.
+    # app.py creates TradingView candle datetimes from Unix timestamps.
+    # On Render these naive datetimes are UTC wall-clock values because the
+    # server runs in UTC. Match the dashboard by interpreting the raw value
+    # as UTC first, then converting it to Asia/Kabul for display.
     if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=_KABUL_TZ)
+        parsed = parsed.replace(tzinfo=timezone.utc)
 
     return parsed.astimezone(timezone.utc)
 
