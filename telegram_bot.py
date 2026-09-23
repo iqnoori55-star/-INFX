@@ -21,7 +21,6 @@ import time
 import urllib.parse
 import urllib.request
 from pathlib import Path
-
 import app
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
@@ -197,6 +196,7 @@ def format_signal(payload, status=None, event_time=None):
     symbol = escape(payload.get("symbol") or app.CURRENT_SYMBOL)
     timeframe = escape(payload.get("timeframe") or app.CURRENT_TIMEFRAME_NAME)
     status_text = escape(status or payload.get("status") or "NEW")
+
     return (
         f"{icon} <b>INFX {direction or 'SIGNAL'}</b>\n"
         f"<b>{symbol} • {timeframe}</b>\n\n"
@@ -208,10 +208,32 @@ def format_signal(payload, status=None, event_time=None):
         f"Status: <b>{status_text}</b>"
     )
 
-
 def event_key(row):
     value = row.get("event_key") or row.get("id")
     return str(value)
+
+
+def _signal_rank(row):
+    """Match the INFX card selection: newest signal_time, then priority score."""
+    payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+    signal_time = payload.get("signal_time") or payload.get("time") or row.get("event_time") or row.get("created_at")
+    try:
+        parsed = app.pd.to_datetime(signal_time, errors="coerce")
+        timestamp = parsed.timestamp() if not app.pd.isna(parsed) else 0.0
+    except Exception:
+        timestamp = 0.0
+
+    try:
+        priority = float(payload.get("priority_score") or payload.get("score") or 0.0)
+    except Exception:
+        priority = 0.0
+
+    try:
+        row_id = int(row.get("id") or 0)
+    except Exception:
+        row_id = 0
+
+    return (timestamp, priority, row_id)
 
 
 def notify_new_events():
@@ -223,55 +245,63 @@ def notify_new_events():
         return
 
     signals = [r for r in rows if r.get("event_type") == "signal"]
-    for row in reversed(signals):
-        key = event_key(row)
-        if not key:
-            continue
-        status = str(row.get("status") or "NEW").upper()
+    if not signals:
+        return
 
-        with _seen_lock:
-            previous = _event_state.get(key)
-            if previous is None:
-                # Backward compatibility: events already present in the old
-                # seen set must not be sent again as NEW after deployment.
-                if key in _seen:
-                    _event_state[key] = status
-                    continue
+    # Telegram must follow the same current-signal selection as INFX instead
+    # of broadcasting every historical signal stored in Event Memory.
+    # Multiple BUY/SELL zones can legitimately exist in Event Memory, while
+    # the dashboard displays the newest signal_time and, on the same candle,
+    # the highest-priority setup.
+    row = max(signals, key=_signal_rank)
+    key = event_key(row)
+    if not key:
+        return
+
+    status = str(row.get("status") or "NEW").upper()
+
+    with _seen_lock:
+        previous = _event_state.get(key)
+        if previous is None:
+            # Backward compatibility: an event already known by the old
+            # seen-state must not be sent again as a NEW alert after deploy.
+            if key in _seen:
                 _event_state[key] = status
-                _seen.add(key)
-                _save_json_set(SEEN_FILE, _seen)
-                EVENT_STATE_FILE.write_text(
-                    json.dumps(_event_state, ensure_ascii=False, indent=2),
-                    encoding="utf-8",
-                )
-                should_send = True
-            elif previous != status:
-                _event_state[key] = status
-                EVENT_STATE_FILE.write_text(
-                    json.dumps(_event_state, ensure_ascii=False, indent=2),
-                    encoding="utf-8",
-                )
-                should_send = True
-            else:
-                should_send = False
+                return
+            _event_state[key] = status
+            _seen.add(key)
+            _save_json_set(SEEN_FILE, _seen)
+            EVENT_STATE_FILE.write_text(
+                json.dumps(_event_state, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            should_send = True
+        elif previous != status:
+            _event_state[key] = status
+            EVENT_STATE_FILE.write_text(
+                json.dumps(_event_state, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            should_send = True
+        else:
+            should_send = False
 
-        if not should_send:
-            continue
+    if not should_send:
+        return
 
-        payload = row.get("payload")
-        if not isinstance(payload, dict):
-            continue
-        message = format_signal(payload, status)
+    payload = row.get("payload")
+    if not isinstance(payload, dict):
+        return
+    message = format_signal(payload, status)
 
-        with _subscribers_lock:
-            subscribers = list(_subscribers)
-        for chat_id in subscribers:
-            try:
-                send_message(chat_id, message)
-            except Exception as exc:
-                if "bot was blocked" in str(exc).lower() or "chat not found" in str(exc).lower():
-                    remove_subscriber(chat_id)
-
+    with _subscribers_lock:
+        subscribers = list(_subscribers)
+    for chat_id in subscribers:
+        try:
+            send_message(chat_id, message)
+        except Exception as exc:
+            if "bot was blocked" in str(exc).lower() or "chat not found" in str(exc).lower():
+                remove_subscriber(chat_id)
 
 def event_loop():
     while True:
