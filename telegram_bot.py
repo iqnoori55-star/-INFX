@@ -322,15 +322,32 @@ def _find_event(rows, key):
     return None
 
 
+def _event_is_terminal(row):
+    status = str((row or {}).get("status") or "ACTIVE").upper()
+    return (
+        status == "STOPPED"
+        or status == "TP3_HIT"
+        or status.startswith("STOPPED_AFTER_TP")
+        or status in {"CANCELLED", "EXPIRED"}
+    )
+
+
 def _select_tracked_event(cfg, rows):
-    """Keep the same signal until INFX produces a genuinely newer signal."""
+    """
+    Keep one Current Signal locked until that signal reaches a terminal
+    outcome. A newer Event Memory row must NOT make Telegram jump to another
+    BUY/SELL while the tracked setup is still active.
+    """
     current_key = _load_current_key()
     current = _find_event(rows, current_key)
 
-    # A real signal from the current V9 brain is authoritative. If it has a
-    # different stable identity, it is a genuinely newer setup and replaces
-    # the tracked event. If there is no current brain signal, KEEP the existing
-    # tracked event instead of selecting another historical Event Memory row.
+    # Hard lock: an existing non-terminal signal owns Telegram until it
+    # finishes. This is the same stability rule the user expects from INFX.
+    if current is not None and not _event_is_terminal(current):
+        return current, current_key, False
+
+    # No active tracked signal (startup or previous signal finished).
+    # Only now may a current V9 brain signal become the next tracked event.
     brain_signal = _current_brain_signal(cfg)
     if brain_signal is not None:
         brain_key = _brain_signal_key(
@@ -340,23 +357,24 @@ def _select_tracked_event(cfg, rows):
         )
         brain_event = _find_event(rows, brain_key)
         if brain_event is not None:
-            if current_key != brain_key:
+            changed = current_key != brain_key
+            if changed:
                 _save_current_key(brain_key)
-            return brain_event, brain_key, current_key != brain_key
+            return brain_event, brain_key, changed
 
+    # If the terminal event is still the newest tracked record, keep showing
+    # it rather than resurrecting an unrelated historical event.
     if current is not None:
         return current, current_key, False
 
-    # First startup / lost state: use the dashboard's remembered fallback.
-    # This happens only when there is no tracked key available.
-    if rows:
-        signals = [r for r in rows if r.get("event_type") == "signal"]
-        if signals:
-            fallback = max(signals, key=_signal_rank)
-            fallback_key = event_key(fallback)
-            if fallback_key:
-                _save_current_key(fallback_key)
-            return fallback, fallback_key, True
+    # First startup / lost state: choose the newest Event Memory signal once.
+    signals = [r for r in rows if r.get("event_type") == "signal"]
+    if signals:
+        fallback = max(signals, key=_signal_rank)
+        fallback_key = event_key(fallback)
+        if fallback_key:
+            _save_current_key(fallback_key)
+        return fallback, fallback_key, True
 
     return None, None, False
 

@@ -3990,10 +3990,32 @@ function renderSignals(signals, risk, rejectedSignals) {
                 - (Number(a?.priority_score ?? a?.score ?? 0) || 0);
         });
 
-    // FIRST PRIORITY — V9 signal is authoritative.
-    // Never hide a signal that the V9 Signal Engine actually returned.
-    // Event Memory is only a history/status layer; it is not allowed to
-    // veto or filter the live V9 signal.
+    // FIRST PRIORITY — keep the currently tracked non-terminal event.
+    // A new V9 signal is allowed to replace it only after the tracked event
+    // has reached a terminal outcome. This keeps Desktop, Mini App and
+    // Telegram on the same stable Current Signal.
+    let currentEvent = null;
+    let currentKey = null;
+
+    try {
+        currentKey = localStorage.getItem(signalEventStorageKey() + ".current") || null;
+    } catch (_) {}
+
+    if (currentKey) {
+        currentEvent = events.find(event => event.key === currentKey) || null;
+    }
+
+    if (currentEvent && !eventIsTerminal(currentEvent)) {
+        qxLockedSignalKey = currentEvent.key;
+        qxLockedSignalSnapshot = {
+            signal: { ...(currentEvent.signal || {}) },
+            risk: { ...(currentEvent.risk || {}) }
+        };
+        renderPersistentEvent(currentEvent);
+        return;
+    }
+
+    // No active tracked event: the latest V9 signal can become the new one.
     if (currentSignals.length) {
         const freshSignal = currentSignals[0];
         const freshRisk = findMatchingRiskRow(freshSignal, Array.isArray(risk) ? risk : []);
@@ -4002,14 +4024,8 @@ function renderSignals(signals, risk, rejectedSignals) {
             ? events.find(event => event.key === freshKey)
             : null;
 
-        // A live V9 signal is authoritative, but if the same immutable signal
-        // already exists in Event Memory, keep its evaluated status instead of
-        // resetting it to NEW on every refresh.
         const directEvent = rememberedFresh
             ? {
-                // IMPORTANT: an existing event is immutable. Do not merge
-                // the current Brain refresh into its snapshot because the
-                // Risk Engine may have a newer live execution price.
                 ...rememberedFresh,
                 signal: { ...(rememberedFresh.signal || {}) },
                 risk: { ...(rememberedFresh.risk || {}) }
@@ -4026,14 +4042,16 @@ function renderSignals(signals, risk, rejectedSignals) {
                 reached_tp: 0
               };
 
+        currentKey = directEvent.key;
+        try {
+            localStorage.setItem(signalEventStorageKey() + ".current", currentKey);
+        } catch (_) {}
+
         qxLockedSignalKey = directEvent.key;
         qxLockedSignalSnapshot = {
             signal: { ...directEvent.signal },
             risk: { ...directEvent.risk }
         };
-        try {
-            localStorage.setItem(signalEventStorageKey() + ".current", directEvent.key);
-        } catch (_) {}
         renderPersistentEvent(directEvent);
         return;
     }
