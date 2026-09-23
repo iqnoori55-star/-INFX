@@ -30,6 +30,7 @@ EVENT_POLL_SECONDS = 3.0
 SUBSCRIBERS_FILE = Path("telegram_subscribers.json")
 SEEN_FILE = Path("telegram_seen_events.json")
 EVENT_STATE_FILE = Path("telegram_event_state.json")
+CURRENT_SIGNAL_FILE = Path("telegram_current_signal.json")
 
 _subscribers_lock = threading.RLock()
 _subscribers = set()
@@ -214,9 +215,14 @@ def event_key(row):
 
 
 def _signal_rank(row):
-    """Match the INFX card selection: newest signal_time, then priority score."""
+    """Match INFX's live signal ordering: newest signal_time, then priority."""
     payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
-    signal_time = payload.get("signal_time") or payload.get("time") or row.get("event_time") or row.get("created_at")
+    signal_time = (
+        payload.get("signal_time")
+        or payload.get("time")
+        or row.get("event_time")
+        or row.get("created_at")
+    )
     try:
         parsed = app.pd.to_datetime(signal_time, errors="coerce")
         timestamp = parsed.timestamp() if not app.pd.isna(parsed) else 0.0
@@ -224,7 +230,11 @@ def _signal_rank(row):
         timestamp = 0.0
 
     try:
-        priority = float(payload.get("priority_score") or payload.get("score") or 0.0)
+        priority = float(
+            payload.get("priority_score")
+            or payload.get("score")
+            or 0.0
+        )
     except Exception:
         priority = 0.0
 
@@ -236,36 +246,147 @@ def _signal_rank(row):
     return (timestamp, priority, row_id)
 
 
+def _brain_signal_rank(signal):
+    """Same ordering used by the INFX dashboard for current brain signals."""
+    signal_time = signal.get("signal_time") or signal.get("time")
+    try:
+        parsed = app.pd.to_datetime(signal_time, errors="coerce")
+        timestamp = parsed.timestamp() if not app.pd.isna(parsed) else 0.0
+    except Exception:
+        timestamp = 0.0
+    try:
+        priority = float(signal.get("priority_score") or signal.get("score") or 0.0)
+    except Exception:
+        priority = 0.0
+    return (timestamp, priority)
+
+
+def _save_current_key(key):
+    tmp = CURRENT_SIGNAL_FILE.with_suffix(CURRENT_SIGNAL_FILE.suffix + ".tmp")
+    tmp.write_text(
+        json.dumps({"event_key": str(key)}, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    tmp.replace(CURRENT_SIGNAL_FILE)
+
+
+def _load_current_key():
+    try:
+        data = json.loads(CURRENT_SIGNAL_FILE.read_text(encoding="utf-8"))
+        key = data.get("event_key") if isinstance(data, dict) else None
+        return str(key) if key else None
+    except Exception:
+        return None
+
+
+def _brain_signal_key(signal, symbol, timeframe):
+    """Build the same persistent signal identity used by app.py Event Memory."""
+    parts = [
+        str(symbol).upper(),
+        str(timeframe).upper(),
+        "signal",
+        str(signal.get("zone_time", "")),
+        str(signal.get("zone_ready_time", "")),
+        str(signal.get("direction", "") or "").upper(),
+        str(signal.get("signal", "") or "").upper(),
+    ]
+    return "|".join(parts)
+
+
+def _current_brain_signal(cfg):
+    """Read the actual current V9 brain signal, not the historical Event Memory."""
+    try:
+        state = app.build_state()
+        brain = state.get("brain") if isinstance(state, dict) else None
+        signals = brain.get("signals", []) if isinstance(brain, dict) else []
+    except Exception:
+        return None
+
+    if hasattr(signals, "to_dict"):
+        signals = signals.to_dict(orient="records")
+    if not isinstance(signals, list):
+        return None
+
+    signals = [s for s in signals if isinstance(s, dict)]
+    if not signals:
+        return None
+    return max(signals, key=_brain_signal_rank)
+
+
+def _find_event(rows, key):
+    if not key:
+        return None
+    for row in rows:
+        if event_key(row) == key and row.get("event_type") == "signal":
+            return row
+    return None
+
+
+def _select_tracked_event(cfg, rows):
+    """Keep the same signal until INFX produces a genuinely newer signal."""
+    current_key = _load_current_key()
+    current = _find_event(rows, current_key)
+
+    # A real signal from the current V9 brain is authoritative. If it has a
+    # different stable identity, it is a genuinely newer setup and replaces
+    # the tracked event. If there is no current brain signal, KEEP the existing
+    # tracked event instead of selecting another historical Event Memory row.
+    brain_signal = _current_brain_signal(cfg)
+    if brain_signal is not None:
+        brain_key = _brain_signal_key(
+            brain_signal,
+            cfg["symbol"],
+            cfg["timeframe"],
+        )
+        brain_event = _find_event(rows, brain_key)
+        if brain_event is not None:
+            if current_key != brain_key:
+                _save_current_key(brain_key)
+            return brain_event, brain_key, current_key != brain_key
+
+    if current is not None:
+        return current, current_key, False
+
+    # First startup / lost state: use the dashboard's remembered fallback.
+    # This happens only when there is no tracked key available.
+    if rows:
+        signals = [r for r in rows if r.get("event_type") == "signal"]
+        if signals:
+            fallback = max(signals, key=_signal_rank)
+            fallback_key = event_key(fallback)
+            if fallback_key:
+                _save_current_key(fallback_key)
+            return fallback, fallback_key, True
+
+    return None, None, False
+
+
 def notify_new_events():
     global _event_state
     try:
         cfg = app.get_current_config()
-        rows = app.get_event_memory(cfg["symbol"], cfg["timeframe"], limit=100)
+        rows = app.get_event_memory(
+            cfg["symbol"],
+            cfg["timeframe"],
+            limit=100,
+        )
     except Exception:
         return
 
-    signals = [r for r in rows if r.get("event_type") == "signal"]
-    if not signals:
-        return
-
-    # Telegram must follow the same current-signal selection as INFX instead
-    # of broadcasting every historical signal stored in Event Memory.
-    # Multiple BUY/SELL zones can legitimately exist in Event Memory, while
-    # the dashboard displays the newest signal_time and, on the same candle,
-    # the highest-priority setup.
-    row = max(signals, key=_signal_rank)
-    key = event_key(row)
-    if not key:
+    row, key, became_new_current = _select_tracked_event(cfg, rows)
+    if row is None or not key:
         return
 
     status = str(row.get("status") or "NEW").upper()
 
     with _seen_lock:
         previous = _event_state.get(key)
+
         if previous is None:
-            # Backward compatibility: an event already known by the old
-            # seen-state must not be sent again as a NEW alert after deploy.
-            if key in _seen:
+            # If this is the first time this tracked event is seen by the
+            # current bot state, send it once. Existing legacy seen state is
+            # respected so deployment does not duplicate an old alert.
+            if key in _seen and not became_new_current:
                 _event_state[key] = status
                 return
             _event_state[key] = status
@@ -282,6 +403,11 @@ def notify_new_events():
                 json.dumps(_event_state, ensure_ascii=False, indent=2),
                 encoding="utf-8",
             )
+            should_send = True
+        elif became_new_current:
+            # The tracked event changed to a genuinely new V9 signal. Even if
+            # its key was seen in an older run, do not recycle that old state
+            # into a new alert; only a fresh current signal should trigger it.
             should_send = True
         else:
             should_send = False
