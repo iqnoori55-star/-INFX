@@ -44,6 +44,100 @@ DEFAULT_MIN_CONFIRMATIONS = 2
 DEFAULT_MAX_DISTANCE_ATR = 3.0
 DEFAULT_ATR_PERIOD = 14
 
+# =========================================================
+# TREND REGIME FILTER
+# =========================================================
+#
+# The Signal Engine is used on M5 XAUUSD. A high-confluence zone can
+# still be a counter-trend setup, so confluence alone is not sufficient
+# for an executable signal. This gate uses only CLOSED data:
+#
+#   M5  -> local momentum
+#   M15 -> primary scalp trend
+#   H1  -> higher-timeframe regime
+#
+# A BUY requires M15 bullish and neither H1 nor M5 to be bearish.
+# A SELL requires M15 bearish and neither H1 nor M5 to be bullish.
+#
+# This is a validation gate, not a ranking bonus. It is deliberately
+# conservative and contains no future/intrabar information.
+# =========================================================
+
+TREND_FAST_EMA = 20
+TREND_SLOW_EMA = 50
+TREND_SLOPE_LOOKBACK = 3
+
+
+def _trend_state(frame: pd.DataFrame) -> str:
+    if frame is None or frame.empty or len(frame) < TREND_SLOW_EMA + TREND_SLOPE_LOOKBACK:
+        return "NEUTRAL"
+
+    close = pd.to_numeric(frame["close"], errors="coerce")
+    fast = close.ewm(span=TREND_FAST_EMA, adjust=False, min_periods=TREND_FAST_EMA).mean()
+    slow = close.ewm(span=TREND_SLOW_EMA, adjust=False, min_periods=TREND_SLOW_EMA).mean()
+
+    if fast.isna().iloc[-1] or slow.isna().iloc[-1]:
+        return "NEUTRAL"
+
+    last_close = float(close.iloc[-1])
+    last_fast = float(fast.iloc[-1])
+    last_slow = float(slow.iloc[-1])
+    slope_fast = float(fast.iloc[-1] - fast.iloc[-TREND_SLOPE_LOOKBACK])
+
+    if last_close > last_fast > last_slow and slope_fast > 0:
+        return "BULLISH"
+    if last_close < last_fast < last_slow and slope_fast < 0:
+        return "BEARISH"
+
+    return "NEUTRAL"
+
+
+def _build_trend_regime(market_data: pd.DataFrame):
+    """Return M5/M15/H1 closed-candle trend states without look-ahead."""
+    frame = market_data[["time", "open", "high", "low", "close"]].copy()
+    frame["time"] = pd.to_datetime(frame["time"], errors="coerce")
+    frame["close"] = pd.to_numeric(frame["close"], errors="coerce")
+    frame = frame.dropna(subset=["time", "close"]).sort_values("time").reset_index(drop=True)
+
+    m5_state = _trend_state(frame)
+
+    indexed = frame.set_index("time")
+    m15 = indexed["close"].resample("15min", label="right", closed="right").last().dropna().to_frame()
+    h1 = indexed["close"].resample("1h", label="right", closed="right").last().dropna().to_frame()
+
+    m15_state = _trend_state(m15)
+    h1_state = _trend_state(h1)
+
+    return {
+        "m5": m5_state,
+        "m15": m15_state,
+        "h1": h1_state,
+    }
+
+
+def _trend_filter_passes(signal_direction: str, regime: dict) -> bool:
+    direction = str(signal_direction or "").upper()
+
+    m5 = regime.get("m5", "NEUTRAL")
+    m15 = regime.get("m15", "NEUTRAL")
+    h1 = regime.get("h1", "NEUTRAL")
+
+    if direction == "BUY":
+        return (
+            m15 == "BULLISH"
+            and m5 != "BEARISH"
+            and h1 != "BEARISH"
+        )
+
+    if direction == "SELL":
+        return (
+            m15 == "BEARISH"
+            and m5 != "BULLISH"
+            and h1 != "BULLISH"
+        )
+
+    return False
+
 
 # =========================================================
 # PRIORITY / RANKING SETTINGS
@@ -218,6 +312,12 @@ def detect_signals(
         historical_data
         .reset_index(drop=True)
     )
+
+    # =====================================================
+    # MULTI-TIMEFRAME TREND REGIME
+    # =====================================================
+    # Only data at or before the current closed candle is used.
+    trend_regime = _build_trend_regime(historical_data)
 
     # =====================================================
     # CURRENT CANDLE
@@ -647,6 +747,18 @@ def detect_signals(
                 continue
 
         # =================================================
+        # MULTI-TIMEFRAME TREND GATE
+        # =================================================
+        # A setup can have excellent confluence and still be counter-trend.
+        # Do not emit it as an executable signal unless the closed M5/M15/H1
+        # regime agrees with its direction.
+        if not _trend_filter_passes(
+            signal_direction,
+            trend_regime,
+        ):
+            continue
+
+        # =================================================
         # STRUCTURE TYPE
         # =================================================
 
@@ -877,6 +989,22 @@ def detect_signals(
 
                 "signal":
                     signal_direction,
+
+                # -----------------------------------------
+                # TREND REGIME
+                # -----------------------------------------
+
+                "trend_m5":
+                    trend_regime.get("m5", "NEUTRAL"),
+
+                "trend_m15":
+                    trend_regime.get("m15", "NEUTRAL"),
+
+                "trend_h1":
+                    trend_regime.get("h1", "NEUTRAL"),
+
+                "trend_filter":
+                    "ALIGNED",
 
                 # -----------------------------------------
                 # SETUP
@@ -1651,6 +1779,15 @@ def _empty_signal_result():
 
             "direction",
             "signal",
+
+            # ---------------------------------------------
+            # Trend Regime
+            # ---------------------------------------------
+
+            "trend_m5",
+            "trend_m15",
+            "trend_h1",
+            "trend_filter",
 
             # ---------------------------------------------
             # Setup
