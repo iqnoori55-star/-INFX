@@ -3901,12 +3901,6 @@ function renderPersistentEvent(event) {
 
     let html = '<div class="signal ' + sideClass + '">';
     html += '<div class="signal-direction">' + escapeHtml(direction) + '</div>';
-    const signalTime = signal.signal_time ?? signal.time ?? event.created_at ?? null;
-    const statusTime = event.status_time ?? null;
-    const signalTimeText = formatSignalTime(signalTime);
-    const statusTimeText = formatSignalTime(statusTime);
-    const ageText = formatSignalAge(signalTime);
-
     html += '<div class="signal-meta">'
         + 'SCORE: <span class="signal-score">' + escapeHtml(formatScore(score)) + '</span>'
         + (strength ? '<span class="signal-strength">' + escapeHtml(strength) + '</span>' : '')
@@ -3915,9 +3909,6 @@ function renderPersistentEvent(event) {
         + (riskRow.rr_tp2 != null ? '<br>RR TP2: <span class="signal-score">1:' + escapeHtml(Number(riskRow.rr_tp2).toFixed(2)) + '</span>' : '')
         + (riskRow.stop_distance_atr != null ? ' · STOP: <span class="signal-score">' + escapeHtml(Number(riskRow.stop_distance_atr).toFixed(2)) + ' ATR</span>' : '')
         + '<br>STATUS: <span class="signal-strength">' + escapeHtml(event.status || "ACTIVE") + '</span>'
-        + '<br>SIGNAL TIME: <span class="signal-time">' + escapeHtml(signalTimeText) + '</span>'
-        + ' · AGE: <span class="signal-time">' + escapeHtml(ageText) + '</span>'
-        + (statusTimeText !== "--" ? '<br>STATUS TIME: <span class="signal-time">' + escapeHtml(statusTimeText) + '</span>' : '')
         + '</div>';
     html += '<div class="levels">';
     html += levelHtml("MARKET ENTRY", entry);
@@ -4117,46 +4108,6 @@ function renderSignals(signals, risk, rejectedSignals) {
     renderSignalOverlay([], []);
 }
 
-function formatSignalTime(value) {
-    if (value === null || value === undefined || value === "") return "--";
-
-    const numeric = tvChartTime(value);
-    if (!Number.isFinite(numeric)) {
-        const text = String(value).trim();
-        return text || "--";
-    }
-
-    try {
-        return new Date(numeric * 1000).toLocaleString("en-GB", {
-            timeZone: "Asia/Kabul",
-            year: "numeric",
-            month: "2-digit",
-            day: "2-digit",
-            hour: "2-digit",
-            minute: "2-digit",
-            second: "2-digit",
-            hour12: false
-        });
-    } catch (_) {
-        return new Date(numeric * 1000).toISOString().replace("T", " ").slice(0, 19);
-    }
-}
-
-function formatSignalAge(value) {
-    const numeric = tvChartTime(value);
-    if (!Number.isFinite(numeric)) return "--";
-
-    const now = Math.floor(Date.now() / 1000);
-    const seconds = Math.max(0, now - numeric);
-
-    if (seconds < 60) return `${seconds}s`;
-    const minutes = Math.floor(seconds / 60);
-    if (minutes < 60) return `${minutes}m`;
-    const hours = Math.floor(minutes / 60);
-    if (hours < 24) return `${hours}h ${minutes % 60}m`;
-    const days = Math.floor(hours / 24);
-    return `${days}d ${hours % 24}h`;
-}
 
 function formatScore(value) {
 

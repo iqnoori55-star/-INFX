@@ -151,16 +151,16 @@ def handle_update(update):
     if command == "/signals":
         try:
             cfg = app.get_current_config()
-            rows = app.get_event_memory(cfg["symbol"], cfg["timeframe"], limit=5)
-            signals = [r for r in rows if r.get("event_type") == "signal"][:5]
-            if not signals:
-                send_message(chat_id, "No remembered INFX signals yet.")
+            rows = app.get_event_memory(cfg["symbol"], cfg["timeframe"], limit=100)
+            row, key, _ = _select_tracked_event(cfg, rows)
+            if row is None:
+                send_message(chat_id, "No current INFX signal yet.")
                 return
-            lines = ["<b>Recent INFX Signals</b>"]
-            for row in signals:
-                p = row.get("payload") if isinstance(row.get("payload"), dict) else {}
-                lines.append(format_signal(p, row.get("status")))
-            send_message(chat_id, "\n\n".join(lines))
+            payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+            send_message(
+                chat_id,
+                format_signal(payload, row.get("status")),
+            )
         except Exception as exc:
             send_message(chat_id, f"INFX is temporarily unavailable.\n<code>{escape(str(exc))}</code>")
 
