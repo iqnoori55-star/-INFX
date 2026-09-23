@@ -21,8 +21,6 @@ import time
 import urllib.parse
 import urllib.request
 from pathlib import Path
-from datetime import datetime, timezone
-from zoneinfo import ZoneInfo
 
 import app
 
@@ -181,94 +179,6 @@ def num(value):
         return "-"
 
 
-_KABUL_TZ = ZoneInfo("Asia/Kabul")
-
-
-def _parse_signal_time(value):
-    """Parse Event Memory signal/event_time into an absolute UTC instant."""
-    if value is None or value == "":
-        return None
-
-    # Numeric Unix timestamps: support seconds and milliseconds.
-    if isinstance(value, (int, float)):
-        number = float(value)
-        if number > 10_000_000_000:
-            number /= 1000.0
-        try:
-            return datetime.fromtimestamp(number, tz=timezone.utc)
-        except Exception:
-            return None
-
-    text = str(value).strip()
-    if not text:
-        return None
-
-    # Numeric strings can also be Unix timestamps.
-    try:
-        number = float(text)
-        if number > 10_000_000_000:
-            number /= 1000.0
-        if number > 1_000_000_000:
-            return datetime.fromtimestamp(number, tz=timezone.utc)
-    except Exception:
-        pass
-
-    if text.endswith("Z"):
-        text = text[:-1] + "+00:00"
-
-    try:
-        parsed = datetime.fromisoformat(text)
-    except Exception:
-        parsed = None
-        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
-            try:
-                parsed = datetime.strptime(text, fmt)
-                break
-            except Exception:
-                pass
-
-    if parsed is None:
-        return None
-
-    # Match INFX: TradingView/Render naive candle timestamps are UTC.
-    # INFX then displays that same instant in Asia/Kabul.
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-
-    return parsed.astimezone(timezone.utc)
-
-
-def _signal_time_text(value):
-    parsed = _parse_signal_time(value)
-    if parsed is None:
-        return "--"
-    return parsed.astimezone(_KABUL_TZ).strftime("%d/%m/%Y, %H:%M:%S")
-
-
-def _signal_age_text(value):
-    parsed = _parse_signal_time(value)
-    if parsed is None:
-        return "--"
-
-    seconds = max(
-        0,
-        int((datetime.now(timezone.utc) - parsed).total_seconds()),
-    )
-
-    if seconds < 60:
-        return f"{seconds}s"
-    minutes = seconds // 60
-    if minutes < 60:
-        return f"{minutes}m"
-    hours = minutes // 60
-    if hours < 24:
-        return f"{hours}h {minutes % 60}m"
-    days = hours // 24
-    return f"{days}d {hours % 24}h"
-
-
-
-
 def format_signal(payload, status=None, event_time=None):
     risk = payload.get("risk") if isinstance(payload.get("risk"), dict) else {}
     direction = str(payload.get("signal") or payload.get("direction") or "").upper()
@@ -287,10 +197,6 @@ def format_signal(payload, status=None, event_time=None):
     symbol = escape(payload.get("symbol") or app.CURRENT_SYMBOL)
     timeframe = escape(payload.get("timeframe") or app.CURRENT_TIMEFRAME_NAME)
     status_text = escape(status or payload.get("status") or "NEW")
-    # Use the immutable signal_time from the INFX signal payload.
-    # This is the same timestamp used by the INFX Signal Card.
-    signal_time = payload.get("signal_time") or payload.get("time")
-
     return (
         f"{icon} <b>INFX {direction or 'SIGNAL'}</b>\n"
         f"<b>{symbol} • {timeframe}</b>\n\n"
@@ -299,9 +205,7 @@ def format_signal(payload, status=None, event_time=None):
         f"TP1: <code>{num(tp1)}</code>\n"
         f"TP2: <code>{num(tp2)}</code>\n"
         f"TP3: <code>{num(tp3)}</code>\n\n"
-        f"Status: <b>{status_text}</b>\n"
-        f"Signal Time: <code>{escape(_signal_time_text(signal_time))}</code>\n"
-        f"Age: <code>{escape(_signal_age_text(signal_time))}</code>"
+        f"Status: <b>{status_text}</b>"
     )
 
 
